@@ -36,21 +36,24 @@ jobs:
           echo "Checking upstream aur.archlinux.org for updates..."
           git clone --depth=1 https://aur.archlinux.org/miro-pdf.git /tmp/aur-upstream
 
-          AUR_UPDATED="false"
           mkdir -p arch
           for f in PKGBUILD .SRCINFO miro-pdf.install .nvchecker.toml; do
             if [ -f "/tmp/aur-upstream/$f" ]; then
-              if [ ! -f "arch/$f" ] || ! cmp -s "/tmp/aur-upstream/$f" "arch/$f"; then
-                echo "File $f updated from AUR"
-                cp -f "/tmp/aur-upstream/$f" "arch/$f"
-                AUR_UPDATED="true"
-              fi
+              cp -f "/tmp/aur-upstream/$f" "arch/$f"
             fi
           done
 
-          # Ensure options=('!debug') is present to prevent extraneous debug packages
+          # Ensure options=(!debug) is present to prevent extraneous debug packages
           if ! grep -q "options=" arch/PKGBUILD; then
             sed -i '/license=/a options=(!debug)' arch/PKGBUILD
+          fi
+
+          AUR_UPDATED="false"
+          if ! git diff --quiet arch/ || [ -n "$(git status --porcelain arch/)" ]; then
+            echo "AUR files have changed"
+            AUR_UPDATED="true"
+          else
+            echo "AUR files are identical to repository"
           fi
 
           echo "aur_updated=${AUR_UPDATED}" >> $GITHUB_OUTPUT
@@ -61,10 +64,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add arch/PKGBUILD arch/.SRCINFO arch/miro-pdf.install arch/.nvchecker.toml
-          PKGVER=$(grep -E '^[[:space:]]*pkgver=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
-          PKGREL=$(grep -E '^[[:space:]]*pkgrel=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
-          git commit -m "chore(aur): sync with upstream AUR (${PKGVER}-${PKGREL})"
-          git push origin master
+          if ! git diff --staged --quiet; then
+            PKGVER=$(grep -E '^[[:space:]]*pkgver=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
+            PKGREL=$(grep -E '^[[:space:]]*pkgrel=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
+            git commit -m "chore(aur): sync with upstream AUR (${PKGVER}-${PKGREL})"
+            git push origin master
+          fi
 
       - name: Check Existing Package Version in Release
         id: check_release
