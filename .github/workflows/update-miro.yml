@@ -1,0 +1,152 @@
+name: Build Miro Pacman Package & Update Repo
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Check daily at 06:00 UTC
+  push:
+    branches:
+      - master
+    paths:
+      - 'arch/**'
+      - '.github/workflows/update-miro.yml'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force rebuild even if version matches'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    name: Sync with AUR & Build Package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync with Upstream AUR
+        id: sync_aur
+        run: |
+          echo "Checking upstream aur.archlinux.org for updates..."
+          git clone --depth=1 https://aur.archlinux.org/miro-pdf.git /tmp/aur-upstream
+
+          AUR_UPDATED="false"
+          mkdir -p arch
+          for f in PKGBUILD .SRCINFO miro-pdf.install .nvchecker.toml; do
+            if [ -f "/tmp/aur-upstream/$f" ]; then
+              if [ ! -f "arch/$f" ] || ! cmp -s "/tmp/aur-upstream/$f" "arch/$f"; then
+                echo "File $f updated from AUR"
+                cp -f "/tmp/aur-upstream/$f" "arch/$f"
+                AUR_UPDATED="true"
+              fi
+            fi
+          done
+
+          echo "aur_updated=${AUR_UPDATED}" >> $GITHUB_OUTPUT
+
+      - name: Commit AUR Updates to Master
+        if: steps.sync_aur.outputs.aur_updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add arch/PKGBUILD arch/.SRCINFO arch/miro-pdf.install arch/.nvchecker.toml
+          PKGVER=$(grep -E '^[[:space:]]*pkgver=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
+          PKGREL=$(grep -E '^[[:space:]]*pkgrel=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
+          git commit -m "chore(aur): sync with upstream AUR (${PKGVER}-${PKGREL})"
+          git push origin master
+
+      - name: Check Existing Package Version in Release
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PKGVER=$(grep -E '^[[:space:]]*pkgver=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
+          PKGREL=$(grep -E '^[[:space:]]*pkgrel=' arch/PKGBUILD | head -n1 | cut -d= -f2 | tr -d "'\" ")
+          TARGET_PKG="miro-pdf-${PKGVER}-${PKGREL}-x86_64.pkg.tar.zst"
+          echo "pkgver=${PKGVER}" >> $GITHUB_OUTPUT
+          echo "pkgrel=${PKGREL}" >> $GITHUB_OUTPUT
+          echo "target_pkg=${TARGET_PKG}" >> $GITHUB_OUTPUT
+
+          EXISTS="false"
+          if gh release view repo -R "${{ github.repository }}" >/dev/null 2>&1; then
+            if gh release view repo -R "${{ github.repository }}" --json assets -q ".assets[].name" | grep -qx "${TARGET_PKG}"; then
+              EXISTS="true"
+            fi
+          fi
+          echo "exists=${EXISTS}" >> $GITHUB_OUTPUT
+          echo "Target package: ${TARGET_PKG}"
+          echo "Package exists in release: ${EXISTS}"
+
+      - name: Build Arch Linux Package & Update Repo DB
+        if: ${{ inputs.force_build == true || steps.check_release.outputs.exists != 'true' || steps.sync_aur.outputs.aur_updated == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARCH_REPO="${GITHUB_WORKSPACE}/arch_repo"
+          BUILD_DIR="${GITHUB_WORKSPACE}/build_dir"
+          mkdir -p "${ARCH_REPO}" "${BUILD_DIR}"
+
+          # Copy AUR source files into build directory
+          cp -a arch/PKGBUILD arch/miro-pdf.install "${BUILD_DIR}/"
+          [ -f arch/.SRCINFO ] && cp -a arch/.SRCINFO "${BUILD_DIR}/"
+          [ -f arch/.nvchecker.toml ] && cp -a arch/.nvchecker.toml "${BUILD_DIR}/"
+
+          # Pull existing repo DB from release if present
+          cd "${ARCH_REPO}"
+          if gh release view repo -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release download repo -R "${{ github.repository }}" -p "custom-miro.db.tar.gz" -p "custom-miro.files.tar.gz" 2>/dev/null || true
+          fi
+
+          # Run official makepkg in Arch Linux container
+          docker run --rm \
+            -v "${BUILD_DIR}":/build \
+            -v "${ARCH_REPO}":/repo \
+            -w /build \
+            archlinux:latest bash -c '
+              set -euxo pipefail
+
+              # Upgrade keyring and install core packaging utilities
+              pacman -Sy --noconfirm archlinux-keyring
+              pacman -S --noconfirm --needed base-devel git sudo pacman-contrib cargo clang unzip glibc fontconfig xdotool gdk-pixbuf2 gtk3 glib2 rust
+
+              # Set up unprivileged user for makepkg
+              useradd -m -s /bin/bash builder
+              echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+              chmod 0440 /etc/sudoers.d/builder
+              chown -R builder:builder /build /repo
+
+              # Run makepkg: downloads sources, verifies checksums, compiles, packages
+              su builder -c "makepkg -s --noconfirm --clean"
+
+              # Move built package to repo directory
+              cp -f /build/miro-pdf-*.pkg.tar.zst /repo/
+              chown -R root:root /repo
+
+              # Update Pacman database
+              cd /repo
+              PKG_FILE=$(ls miro-pdf-*.pkg.tar.zst | sort -V | tail -n 1)
+              repo-remove custom-miro.db.tar.gz miro-pdf || true
+              repo-add -R custom-miro.db.tar.gz "${PKG_FILE}"
+
+              rm -f custom-miro.db custom-miro.files
+              cp -f custom-miro.db.tar.gz custom-miro.db
+              cp -f custom-miro.files.tar.gz custom-miro.files
+            '
+
+          # Publish to GitHub Release
+          cd "${ARCH_REPO}"
+          echo "Publishing repository assets:"
+          ls -la
+          if gh release view repo -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload repo * -R "${{ github.repository }}" --clobber
+          else
+            gh release create repo * -R "${{ github.repository }}" \
+              --title "Miro PDF Arch Linux Repository" \
+              --notes "Automated Pacman repository for Miro PDF Viewer on Arch Linux mirroring upstream aur.archlinux.org. Add this repo to /etc/pacman.conf to receive automated updates on '\''pacman -Syu'\''."
+          fi

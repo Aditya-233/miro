@@ -110,6 +110,25 @@ Configuration parsing errors:
 
 ## Installation
 
+### Arch Linux (Pacman Repository)
+
+An automated Arch Linux Pacman repository is available for `miro-pdf`, automatically built with official Arch Linux `makepkg` mirroring upstream AUR:
+
+Add the following to `/etc/pacman.conf`:
+
+```ini
+[custom-miro]
+SigLevel = Optional TrustAll
+Server = https://github.com/Aditya-233/miro/releases/download/repo
+```
+
+Then update pacman databases and install:
+
+```bash
+sudo pacman -Syu
+sudo pacman -S miro-pdf
+```
+
 ### Pre-compiled binary
 Head over to [releases](https://github.com/vincent-uden/miro/releases) and download the latest binary for your platform, then place it somewhere in your path.
 
