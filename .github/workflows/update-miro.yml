@@ -48,6 +48,11 @@ jobs:
             fi
           done
 
+          # Ensure options=('!debug') is present to prevent extraneous debug packages
+          if ! grep -q "options=" arch/PKGBUILD; then
+            sed -i '/license=/a options=(!debug)' arch/PKGBUILD
+          fi
+
           echo "aur_updated=${AUR_UPDATED}" >> $GITHUB_OUTPUT
 
       - name: Commit AUR Updates to Master
@@ -124,13 +129,16 @@ jobs:
               # Run makepkg: downloads sources, verifies checksums, compiles, packages
               su builder -c "makepkg -s --noconfirm --clean"
 
+              # Remove any debug packages if generated
+              rm -f /build/*-debug-*.pkg.tar.zst 2>/dev/null || true
+
               # Move built package to repo directory
-              cp -f /build/miro-pdf-*.pkg.tar.zst /repo/
+              cp -f /build/miro-pdf-[0-9]*.pkg.tar.zst /repo/
               chown -R root:root /repo
 
               # Update Pacman database
               cd /repo
-              PKG_FILE=$(ls miro-pdf-*.pkg.tar.zst | sort -V | tail -n 1)
+              PKG_FILE=$(ls miro-pdf-[0-9]*.pkg.tar.zst | grep -v -- "-debug-" | sort -V | tail -n 1)
               repo-remove custom-miro.db.tar.gz miro-pdf || true
               repo-add -R custom-miro.db.tar.gz "${PKG_FILE}"
 
@@ -147,6 +155,7 @@ jobs:
             gh release upload repo * -R "${{ github.repository }}" --clobber
           else
             gh release create repo * -R "${{ github.repository }}" \
+              --target master \
               --title "Miro PDF Arch Linux Repository" \
               --notes "Automated Pacman repository for Miro PDF Viewer on Arch Linux mirroring upstream aur.archlinux.org. Add this repo to /etc/pacman.conf to receive automated updates on '\''pacman -Syu'\''."
           fi

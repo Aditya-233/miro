@@ -7,6 +7,7 @@ pkgdesc="A native pdf viewer for Windows and Linux (Wayland/X11) with configurab
 arch=('x86_64')
 url="https://github.com/vincent-uden/miro"
 license=('AGPL-3.0-or-later')
+options=('!debug')
 depends=('glibc' 'libstdc++' 'libgcc' 'fontconfig' 'xdotool' 'gdk-pixbuf2' 'gtk3' 'glib2')
 makedepends=('cargo' 'clang' 'unzip')
 source=("$url/archive/refs/tags/v${pkgver}.tar.gz")
